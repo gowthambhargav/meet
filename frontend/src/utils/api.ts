@@ -1,4 +1,4 @@
-const RAW_API_URL: string = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3000/api/v1'
+const RAW_API_URL: string = (import.meta as any).env?.VITE_API_URL;
 export const API_URL: string = RAW_API_URL.replace(/\/+$/, '')
 
 type Json = Record<string, any>

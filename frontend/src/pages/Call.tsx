@@ -36,6 +36,16 @@ const Call: React.FC = () => {
     localStorage.setItem('theme', darkMode ? 'dark' : 'light')
   }, [darkMode])
 
+  // Debug settings modal state
+  useEffect(() => {
+    console.log('showSettings changed to:', showSettings)
+  }, [showSettings])
+
+  // Debug settings modal state
+  useEffect(() => {
+    console.log('showSettings changed to:', showSettings)
+  }, [showSettings])
+
   // Load available devices
   useEffect(() => {
     const loadDevices = async () => {
@@ -1113,7 +1123,7 @@ const Call: React.FC = () => {
 
             {/* More Options (3 dots) */}
             <div className="relative" data-more-options>
-              <IconBtn onClick={() => setShowMoreOptions(!showMoreOptions)} active={showMoreOptions} label="More options">
+              <IconBtn onClick={() =>setShowSettings(true)} label="More options">
                 <FiMoreVertical className="w-6 h-6" />
               </IconBtn>
             </div>
@@ -1206,7 +1216,7 @@ const Call: React.FC = () => {
 
       {/* More Options Dropdown - Mobile Only */}
       {showMoreOptions && (
-        <div className="fixed inset-0 z-40 md:hidden" data-more-options>
+        <div className="fixed inset-0 z-30 md:hidden" data-more-options>
           {/* Backdrop */}
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowMoreOptions(false)} />
           {/* Panel */}
@@ -1270,6 +1280,41 @@ const Call: React.FC = () => {
               <span className="text-sm font-medium">{showParticipants ? 'Hide Participants' : 'Show Participants'}</span>
             </button>
 
+            {/* Settings */}
+            <button
+              onClick={() => {
+                console.log('Settings button clicked on mobile')
+                setShowMoreOptions(false) // Close dropdown first
+                setTimeout(() => {
+                  console.log('Opening settings modal')
+                  setShowSettings(true)
+                }, 100) // Small delay to ensure dropdown closes first
+              }}
+              className={`w-full px-4 py-3 flex items-center gap-3 transition-colors duration-150 text-left ${darkMode ? 'hover:bg-gray-800 text-gray-100' : 'hover:bg-gray-100 text-gray-900'}`}
+            >
+              <FiSettings className="w-5 h-5" />
+              <span className="text-sm font-medium">Settings</span>
+            </button>
+
+            {/* Share Link (Mobile) */}
+            {shareUrl && (
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(shareUrl).then(() => {
+                    console.log('Meeting link copied to clipboard')
+                    setShowMoreOptions(false)
+                  }).catch(() => {
+                    console.warn('Failed to copy meeting link')
+                    setShowMoreOptions(false)
+                  })
+                }}
+                className={`w-full px-4 py-3 flex items-center gap-3 transition-colors duration-150 text-left ${darkMode ? 'hover:bg-gray-800 text-gray-100' : 'hover:bg-gray-100 text-gray-900'}`}
+              >
+                <FiLink className="w-5 h-5" />
+                <span className="text-sm font-medium">Copy Meeting Link</span>
+              </button>
+            )}
+
 
 
             {/* Appearance */}
@@ -1297,14 +1342,27 @@ const Call: React.FC = () => {
 
       {/* Settings Modal */}
       {showSettings && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className={`rounded-xl sm:rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-white'}`} data-settings-modal>
+        <div 
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] p-2 sm:p-4"
+          style={{ display: 'flex', visibility: 'visible', position: 'fixed' }}
+          onClick={(e) => {
+            console.log('Settings modal backdrop clicked')
+            if (e.target === e.currentTarget) {
+              setShowSettings(true)
+            }
+          }}
+        >
+          <div 
+            className={`rounded-xl sm:rounded-2xl shadow-2xl w-full max-w-[95vw] sm:max-w-lg max-h-[90vh] sm:max-h-[90vh] overflow-y-auto transition-colors duration-200 mx-auto ${darkMode ? 'bg-gray-800' : 'bg-white'}`} 
+            style={{ display: 'block', visibility: 'visible', position: 'relative' }}
+            data-settings-modal
+          >
             {/* Header */}
             <div className={`px-4 sm:px-6 py-3 sm:py-4 border-b flex items-center justify-between ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
               <h2 className={`text-lg sm:text-xl font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Settings</h2>
               <button
                 onClick={() => setShowSettings(false)}
-                className={`p-1 rounded-lg transition-colors ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
+                className={`p-2 sm:p-1 rounded-lg transition-colors touch-manipulation ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -1313,7 +1371,7 @@ const Call: React.FC = () => {
             </div>
 
             {/* Content */}
-            <div className="px-4 sm:px-6 py-4 space-y-6">
+            <div className="px-4 sm:px-6 py-4 space-y-4 sm:space-y-6">
               {/* Video Preview */}
               <div>
                 <label className={`text-sm font-medium mb-3 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Video Preview</label>
@@ -1438,7 +1496,7 @@ const Call: React.FC = () => {
                         max="100"
                         value={volume}
                         onChange={(e) => setVolume(Number(e.target.value))}
-                        className={`flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer ${darkMode ? 'bg-gray-600' : 'bg-gray-200'}`}
+                        className={`flex-1 h-3 sm:h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer touch-manipulation ${darkMode ? 'bg-gray-600' : 'bg-gray-200'}`}
                         style={{
                           background: `linear-gradient(to right, #10b981 0%, #10b981 ${volume}%, ${darkMode ? '#374151' : '#e5e7eb'} ${volume}%, ${darkMode ? '#374151' : '#e5e7eb'} 100%)`
                         }}
@@ -1490,7 +1548,7 @@ const Call: React.FC = () => {
 
       {/* End Call Confirmation Modal */}
       {showEndCallModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] p-4">
           <div className={`rounded-xl sm:rounded-2xl shadow-2xl p-4 sm:p-8 w-full max-w-sm transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
             <h2 className={`text-lg sm:text-2xl font-bold mb-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>End call?</h2>
             <p className={`mb-4 sm:mb-6 text-sm sm:text-base ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>Are you sure you want to leave this meeting? You can rejoin anytime.</p>
