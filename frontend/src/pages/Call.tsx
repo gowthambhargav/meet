@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
-import { API_URL, endMeeting as endMeetingApi, getParticipants, joinMeeting, leaveMeeting } from '../utils/api'
+import { API_URL, endMeeting as endMeetingApi, joinMeeting, leaveMeeting } from '../utils/api'
 import { io, Socket } from 'socket.io-client'
 import ParticipantsSidebar from '../components/ParticipantsSidebar'
-import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiMonitor, FiPhone, FiGrid, FiMaximize2, FiList, FiUsers, FiSettings, FiMoon, FiSun, FiMoreVertical, FiLink } from 'react-icons/fi'
+import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiMonitor, FiPhone, FiUsers, FiSettings, FiMoon, FiSun, FiMoreVertical, FiLink } from 'react-icons/fi'
 
 const Call: React.FC = () => {
   const savedMeeting = (() => {
@@ -35,15 +35,19 @@ const Call: React.FC = () => {
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Element
+      
+      // Check if clicked outside settings dropdown
       if (showSettings && !target.closest('[data-settings-dropdown]')) {
         setShowSettings(false)
       }
+      
+      // Check if clicked outside more options dropdown
       if (showMoreOptions && !target.closest('[data-more-options]')) {
         setShowMoreOptions(false)
       }
     }
 
-    // Use click instead of mousedown so menu items can receive the click
+    // Add event listener
     document.addEventListener('click', handleClickOutside)
     return () => document.removeEventListener('click', handleClickOutside)
   }, [showSettings, showMoreOptions])
@@ -123,7 +127,6 @@ const Call: React.FC = () => {
   // Participants state loaded from backend
   type ViewParticipant = { id: number; name: string; initials: string; isSpeaking: boolean }
   const [participants, setParticipants] = useState<ViewParticipant[]>([])
-  const [participantsError, setParticipantsError] = useState<string>('')
   type RemotePeer = { socketId: string; userId?: string; name?: string; stream: MediaStream }
   const [remotePeers, setRemotePeers] = useState<RemotePeer[]>([])
 
@@ -208,104 +211,151 @@ const Call: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryMeetingId, userId])
 
+  // Update participants based on WebRTC connections only
   useEffect(() => {
-    if (!queryMeetingId) return
-    let active = true
-    const fetchOnce = async () => {
-      try {
-        const data: any = await getParticipants(queryMeetingId)
-        if (!active) return
-        const raw = Array.isArray(data.participants) ? data.participants : []
-        const mapped: ViewParticipant[] = raw.map((p: any, idx: number) => {
-          const nm: string = p.name || p.userId || `User${idx+1}`
-          return {
-            id: idx + 1,
-            name: nm,
-            initials: nm.split(' ').map((s: string)=>s[0]).slice(0,2).join('').toUpperCase(),
-            isSpeaking: false
-          }
-        })
-        // Merge with remote peers to include connected WebRTC participants
-        const remoteMapped: ViewParticipant[] = remotePeers.map((rp, idx) => {
-          const nm = rp.name || rp.userId || `Remote${idx+1}`
-          return {
-            id: mapped.length + idx + 1,
-            name: nm,
-            initials: nm.split(' ').map((s: string)=>s[0]).slice(0,2).join('').toUpperCase(),
-            isSpeaking: false
-          }
-        })
-        // Deduplicate by userId if present
-        const all = [...mapped, ...remoteMapped]
-        const seen = new Set<string>()
-        const unique = all.filter(p => {
-          const key = p.name.toLowerCase()
-          if (seen.has(key)) return false
-          seen.add(key)
-          return true
-        })
-        setParticipants(unique)
-        setParticipantsError('')
-      } catch (e: any) {
-        if (!active) return
-        setParticipantsError(e?.message || 'Failed to load participants')
+    const remoteMapped: ViewParticipant[] = remotePeers.map((rp, idx) => {
+      const nm = rp.name || rp.userId || `Remote${idx+1}`
+      return {
+        id: idx + 1,
+        name: nm,
+        initials: nm.split(' ').map((s: string)=>s[0]).slice(0,2).join('').toUpperCase(),
+        isSpeaking: false
       }
-    }
-    fetchOnce()
-    const id = setInterval(fetchOnce, 5000)
-    return () => { active = false; clearInterval(id) }
-  }, [queryMeetingId, remotePeers])
+    })
+    setParticipants(remoteMapped)
+  }, [remotePeers])
 
   // Default open participants sidebar if unauthenticated
   useEffect(() => {
     if (!hasAuth) setShowParticipants(true)
   }, [hasAuth])
 
+  // Debug helper for camera toggle
+  const handleCameraToggle = async () => {
+    const newCameraState = !cameraOff
+    console.log('=== CAMERA TOGGLE ===', { 
+      from: cameraOff ? 'OFF' : 'ON',
+      to: newCameraState ? 'OFF' : 'ON',
+      hasStream: !!stream,
+      streamTracks: stream?.getTracks().length || 0,
+      videoElement: !!videoRef.current
+    })
+    setCameraOff(!cameraOff)
+  }
+
   const myName = savedMeeting?.name || localStorage.getItem('rc_name') || 'You'
   const myInitials = myName.split(' ').map((s: string) => s[0]).slice(0,2).join('').toUpperCase() || 'YO'
-  const [layout, setLayout] = useState<'tiled' | 'spotlight' | 'sidebar'>('sidebar')
 
-  // Start/stop local media based on camera toggle
+  // Debug stream and camera state changes
+
+
+  // Camera stream management
   useEffect(() => {
-    let current: MediaStream | null = null
-    const ensureStream = async () => {
-      try {
-        if (!cameraOff && !current) {
-          const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-          current = s
-          setStream(s)
-          if (videoRef.current) {
-            ;(videoRef.current as any).srcObject = s
+    let isMounted = true
+    
+    const manageStream = async () => {
+      console.log('Managing stream:', { cameraOff, hasStream: !!stream, isMuted })
+      
+      if (!cameraOff) {
+        // Camera should be ON
+        try {
+          const newStream = await navigator.mediaDevices.getUserMedia({ 
+            video: true, 
+            audio: true 
+          })
+          
+          if (isMounted) {
+            // Stop old stream if exists
+            if (stream) {
+              stream.getTracks().forEach(t => t.stop())
+            }
+            
+            // Apply mute state to new stream before setting it
+            newStream.getAudioTracks().forEach(t => (t.enabled = !isMuted))
+            
+            setStream(newStream)
+            console.log('Camera turned ON, new stream created')
+            
+            // Set video element immediately
+            if (videoRef.current && isMounted) {
+              console.log('Assigning new stream to video element')
+              videoRef.current.srcObject = newStream
+              videoRef.current.play().catch(console.warn)
+            }
+          } else {
+            newStream.getTracks().forEach(t => t.stop())
           }
-          // apply current mute preference
-          s.getAudioTracks().forEach(t => (t.enabled = !isMuted))
+        } catch (e) {
+          console.error('Camera access failed:', e)
+          if (isMounted) {
+            setCameraOff(true)
+          }
         }
-        if (cameraOff && stream) {
+      } else {
+        // Camera should be OFF
+        if (stream) {
+          console.log('Camera turned OFF, stopping stream')
           stream.getTracks().forEach(t => t.stop())
-          setStream(null)
+          
+          if (isMounted) {
+            setStream(null)
+            if (videoRef.current) {
+              videoRef.current.srcObject = null
+            }
+          }
         }
-      } catch (e) {
-        console.warn('getUserMedia failed', e)
       }
     }
-    ensureStream()
+
+    manageStream()
+    
     return () => {
-      // cleanup when unmount or re-run
-      if (current) current.getTracks().forEach(t => t.stop())
+      isMounted = false
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraOff])
 
-  // Reflect mute toggle to existing stream
+  // Cleanup streams on unmount
   useEffect(() => {
-    if (stream) stream.getAudioTracks().forEach(t => (t.enabled = !isMuted))
-  }, [isMuted, stream])
+    return () => {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop())
+      }
+    }
+  }, [stream])
+
+  // Handle mute changes on existing stream
+  useEffect(() => {
+    if (stream && !cameraOff) {
+      stream.getAudioTracks().forEach(t => (t.enabled = !isMuted))
+      console.log('Audio mute changed:', !isMuted)
+    }
+  }, [isMuted, stream, cameraOff])
+
+  // Assign stream to video element when available
+  useEffect(() => {
+    if (videoRef.current) {
+      if (stream && !cameraOff) {
+        console.log('Assigning stream to video element via useEffect')
+        videoRef.current.srcObject = stream
+        videoRef.current.play().catch(console.warn)
+      } else {
+        console.log('Clearing video element via useEffect')
+        videoRef.current.srcObject = null
+      }
+    }
+  }, [stream, cameraOff])
 
   // Socket.IO + WebRTC mesh connections
   useEffect(() => {
     if (!queryMeetingId) return
     const SOCKET_URL = API_URL.replace(/\/api\/v1$/, '')
-    const socket = io(SOCKET_URL, { transports: ['websocket'], withCredentials: true })
+    const socket = io(SOCKET_URL, { 
+      transports: ['websocket', 'polling'], 
+      withCredentials: true,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
+    })
     socketRef.current = socket
 
     const rtcConfig: RTCConfiguration = {
@@ -317,16 +367,52 @@ const Call: React.FC = () => {
     const addLocalTracks = (pc: RTCPeerConnection) => {
       if (!stream) return
       try {
-        stream.getTracks().forEach(t => { try { pc.addTrack(t, stream) } catch {} })
-      } catch {}
+        stream.getTracks().forEach(track => {
+          try {
+            // Check if track is already added
+            const existingSender = pc.getSenders().find(sender => sender.track === track)
+            if (!existingSender) {
+              pc.addTrack(track, stream)
+            }
+          } catch (e) {
+            console.warn('Failed to add track:', e)
+          }
+        })
+      } catch (e) {
+        console.warn('Failed to add local tracks:', e)
+      }
+    }
+
+    const removeLocalTracks = (pc: RTCPeerConnection) => {
+      try {
+        pc.getSenders().forEach(sender => {
+          if (sender.track) {
+            try {
+              pc.removeTrack(sender)
+            } catch (e) {
+              console.warn('Failed to remove track:', e)
+            }
+          }
+        })
+      } catch (e) {
+        console.warn('Failed to remove local tracks:', e)
+      }
     }
 
     const cleanupPeer = (sid: string) => {
       const pc = peersRef.current.get(sid)
       if (pc) {
-        try { pc.onicecandidate = null; pc.ontrack = null } catch {}
-        try { pc.getSenders().forEach(s => { try { pc.removeTrack(s) } catch {} }) } catch {}
-        try { pc.close() } catch {}
+        try { 
+          pc.onicecandidate = null
+          pc.ontrack = null
+          pc.onconnectionstatechange = null
+        } catch {}
+        try { 
+          removeLocalTracks(pc)
+        } catch {}
+        try { 
+          pc.close() 
+        } catch {}
       }
       peersRef.current.delete(sid)
       peerInfoRef.current.delete(sid)
@@ -414,7 +500,41 @@ const Call: React.FC = () => {
       peersRef.current.forEach((_, sid) => cleanupPeer(sid))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryMeetingId, userId, stream])
+  }, [queryMeetingId, userId])
+
+  // Update peer connections when stream changes (camera toggle)
+  useEffect(() => {
+    if (socketRef.current?.connected) {
+      // Update all existing peer connections with new stream state
+      peersRef.current.forEach((pc) => {
+        try {
+          // Remove all existing tracks first
+          pc.getSenders().forEach(sender => {
+            if (sender.track) {
+              try {
+                pc.removeTrack(sender)
+              } catch (e) {
+                console.warn('Failed to remove track:', e)
+              }
+            }
+          })
+          
+          // Add new tracks if stream exists and camera is on
+          if (stream && !cameraOff) {
+            stream.getTracks().forEach(track => {
+              try {
+                pc.addTrack(track, stream)
+              } catch (e) {
+                console.warn('Failed to add track:', e)
+              }
+            })
+          }
+        } catch (e) {
+          console.warn('Failed to update peer tracks:', e)
+        }
+      })
+    }
+  }, [stream])
 
   // Reusable button with modern UI
   const IconBtn: React.FC<React.ButtonHTMLAttributes<HTMLButtonElement> & {active?: boolean; danger?: boolean; success?: boolean; label: string}> = ({active, danger, success, label, className = '', children, ...props}) => {
@@ -460,110 +580,56 @@ const Call: React.FC = () => {
       {/* Main Video Area */}
   <div className={`flex-1 p-2 sm:p-4 transition-colors duration-200 overflow-hidden ${darkMode ? 'bg-gray-950' : 'bg-gray-50'}`}>
         <div className="h-full overflow-hidden">
-          {layout === 'sidebar' && (
-            <div className={`grid gap-2 sm:gap-4 h-full overflow-hidden ${showParticipants ? 'grid-cols-1 lg:grid-cols-4' : 'grid-cols-1'}`}>
-              {/* Main Video */}
-              <div className={`${showParticipants ? 'lg:col-span-3' : 'col-span-1'} rounded-xl sm:rounded-2xl overflow-hidden shadow-lg relative group transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
-                <div className="w-full h-full bg-linear-to-br from-green-600 to-green-800 flex items-center justify-center relative overflow-hidden">
-                  {stream && !cameraOff ? (
-                    <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
-                  ) : (
-                  <div className="flex flex-col items-center">
-                    <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full bg-green-700 flex items-center justify-center mb-2 sm:mb-4 ring-4 ring-green-500/30">
-                      <span className="text-2xl sm:text-4xl font-bold text-white">{myInitials}</span>
-                    </div>
-                    <h2 className="text-white text-lg sm:text-xl font-semibold">{myName}</h2>
-                    <p className="text-green-200 text-xs sm:text-sm">Your video</p>
+          <div className={`grid gap-2 sm:gap-4 h-full overflow-hidden ${showParticipants ? 'grid-cols-1 lg:grid-cols-4' : 'grid-cols-1'}`}>
+            {/* Main Video */}
+            <div className={`${showParticipants ? 'lg:col-span-3' : 'col-span-1'} rounded-xl sm:rounded-2xl overflow-hidden shadow-lg relative group transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
+              <div className="w-full h-full bg-linear-to-br from-green-600 to-green-800 flex items-center justify-center relative overflow-hidden">
+                {stream && !cameraOff ? (
+                  <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+                ) : (
+                <div className="flex flex-col items-center">
+                  <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full bg-green-700 flex items-center justify-center mb-2 sm:mb-4 ring-4 ring-green-500/30">
+                    <span className="text-2xl sm:text-4xl font-bold text-white">{myInitials}</span>
                   </div>
-                  )}
-                  {cameraOff && (
-                    <div className="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-sm">
-                      <div className="text-center">
-                        <svg className="w-8 h-8 sm:w-12 sm:h-12 text-white mx-auto mb-2" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm10.5-2L9 4.5 7.5 3h5z" />
-                        </svg>
-                        <p className="text-white text-xs sm:text-sm font-medium">Camera off</p>
-                      </div>
-                    </div>
-                  )}
+                  <h2 className="text-white text-lg sm:text-xl font-semibold">{myName}</h2>
+                  <p className="text-green-200 text-xs sm:text-sm">Your video</p>
                 </div>
-              </div>
-              {/* Remote peers thumbnail rail */}
-              {remotePeers.length > 0 && (
-                <div className={`mt-2 ${showParticipants ? 'lg:col-span-3' : 'col-span-1'}`}>
-                  <div className="flex gap-2 flex-wrap">
-                    {remotePeers.map((rp) => (
-                      <div key={rp.socketId} className={`relative w-40 h-24 rounded-md overflow-hidden ${darkMode ? 'bg-gray-900/40' : 'bg-gray-200/60'}`}>
-                        <video autoPlay playsInline className="w-full h-full object-cover" ref={(el)=>{ if (el && rp.stream) (el as any).srcObject = rp.stream }} />
-                        <div className={`absolute bottom-0 left-0 right-0 text-[10px] px-1 py-0.5 truncate ${darkMode ? 'bg-black/40 text-white' : 'bg-white/60 text-gray-900'}`}>
-                          {rp.name || rp.userId || 'Participant'}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Participants Sidebar - Conditional */}
-              {showParticipants && (
-                <div className="lg:col-span-1 overflow-y-auto overflow-x-hidden pr-0 sm:pr-2 scrollbar-hide">
-                  {participantsError && (
-                    <div className="text-xs text-red-500 p-2">{participantsError}</div>
-                  )}
-                  <ParticipantsSidebar participants={participants} />
-                </div>
-              )}
-            </div>
- 
-          )}
-
-          {layout === 'tiled' && (
-            <div className="w-full h-full overflow-y-auto overflow-x-hidden pb-4">
-              <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-3 lg:gap-4 auto-rows-max">
-                {participants.map((p) => (
-                  <div key={p.id} className={`rounded-xl sm:rounded-2xl overflow-hidden shadow-lg aspect-video flex items-center justify-center relative transition-all duration-200 hover:shadow-xl active:scale-95 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
-                    <div className="flex flex-col items-center justify-center overflow-hidden w-full h-full p-2">
-                      <div className={`w-10 h-10 sm:w-14 sm:h-14 lg:w-20 lg:h-20 rounded-full flex items-center justify-center mb-1 sm:mb-2 transition-all ${p.isSpeaking ? 'bg-linear-to-tr from-yellow-400 to-amber-500 ring-4 ring-yellow-300/60 animate-pulse' : darkMode ? 'bg-gray-600' : 'bg-gray-300'}`}>
-                        <span className="text-sm sm:text-lg lg:text-2xl font-bold text-white">{p.initials}</span>
-                      </div>
-                      <h3 className={`text-xs sm:text-sm font-semibold text-center px-1 truncate w-full ${darkMode ? 'text-white' : 'text-gray-900'}`}>{p.name}</h3>
+                )}
+                {cameraOff && (
+                  <div className="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-sm">
+                    <div className="text-center">
+                      <svg className="w-8 h-8 sm:w-12 sm:h-12 text-white mx-auto mb-2" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm10.5-2L9 4.5 7.5 3h5z" />
+                      </svg>
+                      <p className="text-white text-xs sm:text-sm font-medium">Camera off</p>
                     </div>
                   </div>
-                ))}
+                )}
               </div>
             </div>
-          )}
-
-          {layout === 'spotlight' && (
-            <div className="h-full flex flex-col gap-2 sm:gap-3 overflow-hidden">
-              {/* Main Speaker */}
-              <div className={`rounded-xl sm:rounded-2xl overflow-hidden shadow-lg flex-1 flex items-center justify-center transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
-                <div className="text-center overflow-hidden p-4">
-                  <div className="w-20 h-20 sm:w-28 sm:h-28 rounded-full bg-green-700 flex items-center justify-center mb-2 sm:mb-4 mx-auto ring-4 ring-green-500/50">
-                    <span className="text-3xl sm:text-4xl font-bold text-white">{participants[0].initials}</span>
-                  </div>
-                  <h2 className={`text-lg sm:text-2xl font-semibold truncate px-2 ${darkMode ? 'text-white' : 'text-gray-900'}`}>{participants[0].name}</h2>
-                  <p className={`text-xs sm:text-sm mt-1 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Speaking</p>
-                </div>
-              </div>
-
-              {/* Participant Thumbnails - Scrollable */}
-              <div className="overflow-x-auto overflow-y-hidden scrollbar-hide pb-2">
-                <div className="flex gap-2 sm:gap-3 min-w-max px-1">
-                  {participants.slice(1, 13).map((p) => (
-                    <div key={p.id} className={`rounded-lg sm:rounded-xl w-24 sm:w-28 lg:w-32 h-20 sm:h-24 lg:h-28 flex items-center justify-center transition-all duration-200 hover:shadow-lg active:scale-95 cursor-pointer shrink-0 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
-                      <div className="flex flex-col items-center justify-center overflow-hidden w-full h-full p-2">
-                        <div className={`w-10 h-10 sm:w-12 sm:h-12 lg:w-14 lg:h-14 rounded-full flex items-center justify-center mb-1 transition-all ${p.isSpeaking ? 'bg-linear-to-tr from-yellow-400 to-amber-500 ring-4 ring-yellow-300/60 animate-pulse' : darkMode ? 'bg-gray-600' : 'bg-gray-300'}`}>
-                          <span className="text-sm sm:text-base lg:text-lg font-bold text-white">{p.initials}</span>
-                        </div>
-                        <div className={`text-xs truncate w-full text-center px-1 ${darkMode ? 'text-white' : 'text-gray-900'}`}>{p.name.split(' ')[0]}</div>
+            {/* Remote peers thumbnail rail */}
+            {remotePeers.length > 0 && (
+              <div className={`mt-2 ${showParticipants ? 'lg:col-span-3' : 'col-span-1'}`}>
+                <div className="flex gap-2 flex-wrap">
+                  {remotePeers.map((rp) => (
+                    <div key={rp.socketId} className={`relative w-40 h-24 rounded-md overflow-hidden ${darkMode ? 'bg-gray-900/40' : 'bg-gray-200/60'}`}>
+                      <video autoPlay playsInline className="w-full h-full object-cover" ref={(el)=>{ if (el && rp.stream) (el as any).srcObject = rp.stream }} />
+                      <div className={`absolute bottom-0 left-0 right-0 text-[10px] px-1 py-0.5 truncate ${darkMode ? 'bg-black/40 text-white' : 'bg-white/60 text-gray-900'}`}>
+                        {rp.name || rp.userId || 'Participant'}
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
-            </div>
-          )}
+            )}
+
+            {/* Participants Sidebar - Conditional */}
+            {showParticipants && (
+              <div className="lg:col-span-1 overflow-y-auto overflow-x-hidden pr-0 sm:pr-2 scrollbar-hide">
+                <ParticipantsSidebar participants={participants} />
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -578,7 +644,7 @@ const Call: React.FC = () => {
             </IconBtn>
 
             {/* Camera */}
-            <IconBtn onClick={() => setCameraOff(!cameraOff)} danger={cameraOff} label={cameraOff ? 'Turn on camera' : 'Turn off camera'}>
+            <IconBtn onClick={handleCameraToggle} danger={cameraOff} label={cameraOff ? 'Turn on camera' : 'Turn off camera'}>
               {cameraOff ? <FiVideoOff className="w-6 h-6" /> : <FiVideo className="w-6 h-6" />}
             </IconBtn>
 
@@ -605,7 +671,7 @@ const Call: React.FC = () => {
               </IconBtn>
 
               {/* Camera */}
-              <IconBtn onClick={() => setCameraOff(!cameraOff)} danger={cameraOff} label={cameraOff ? 'Turn on camera' : 'Turn off camera'}>
+              <IconBtn onClick={handleCameraToggle} danger={cameraOff} label={cameraOff ? 'Turn on camera' : 'Turn off camera'}>
                 {cameraOff ? <FiVideoOff className="w-6 h-6" /> : <FiVideo className="w-6 h-6" />}
               </IconBtn>
 
@@ -623,26 +689,13 @@ const Call: React.FC = () => {
               <IconBtn onClick={() => setShowParticipants(!showParticipants)} active={showParticipants} label={showParticipants ? 'Hide participants' : 'Show participants'}>
                 <FiUsers className="w-6 h-6" />
               </IconBtn>
-
-              {/* Layout Switcher */}
-              <IconBtn onClick={() => setLayout('sidebar')} active={layout === 'sidebar'} label="Sidebar layout">
-                <FiList className="w-6 h-6" />
-              </IconBtn>
-
-              <IconBtn onClick={() => setLayout('tiled')} active={layout === 'tiled'} label="Grid layout">
-                <FiGrid className="w-6 h-6" />
-              </IconBtn>
-
-              <IconBtn onClick={() => setLayout('spotlight')} active={layout === 'spotlight'} label="Spotlight layout">
-                <FiMaximize2 className="w-6 h-6" />
-              </IconBtn>
             </div>
 
             <div className={`w-px h-8 ${darkMode ? 'bg-gray-600' : 'bg-gray-400'}`} />
 
             {/* Settings */}
             <div className="relative" data-settings-dropdown>
-              <IconBtn onClick={() => setShowSettings(!showSettings)} success={showSettings} label="Settings">
+              <IconBtn onClick={() => setShowSettings(!showSettings)} active={showSettings} label="Settings">
                 <FiSettings className="w-6 h-6" />
               </IconBtn>
             </div>
@@ -697,8 +750,53 @@ const Call: React.FC = () => {
           <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setShowMoreOptions(false)} />
           {/* Panel */}
           <div 
-            className={`absolute bottom-24 left-1/2 -translate-x-1/2 w-[min(420px,92%)] sm:w-auto sm:right-8 sm:left-auto sm:translate-x-0 sm:min-w-[280px] rounded-xl shadow-2xl py-2 z-10 transition-all duration-200 origin-bottom ${darkMode ? 'bg-gray-900/95 border border-gray-800 backdrop-blur-md' : 'bg-white/95 border border-gray-200 backdrop-blur-md'}`}
+            className={`absolute bottom-24 left-1/2 -translate-x-1/2 w-[min(420px,92%)] max-h-[70vh] overflow-y-auto rounded-xl shadow-2xl py-3 z-10 transition-all duration-200 origin-bottom ${darkMode ? 'bg-gray-900/95 border border-gray-800 backdrop-blur-md' : 'bg-white/95 border border-gray-200 backdrop-blur-md'}`}
           >
+            {/* Header */}
+            <div className={`px-4 py-2 border-b ${darkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+              <h3 className={`text-sm font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Meeting Options</h3>
+            </div>
+
+            {/* Media Controls */}
+            <div className="px-4 py-3">
+              <label className={`text-xs font-medium mb-2 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Media Controls</label>
+              <div className="space-y-2 mb-4">
+                <button
+                  onClick={() => {
+                    setIsMuted(!isMuted)
+                    setShowMoreOptions(false)
+                  }}
+                  className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${isMuted ? (darkMode ? 'bg-red-600/20 hover:bg-red-600/30 text-red-400' : 'bg-red-50 hover:bg-red-100 text-red-600') : (darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}`}
+                >
+                  <div className="flex items-center gap-3">
+                    {isMuted ? <FiMicOff className="w-5 h-5" /> : <FiMic className="w-5 h-5" />}
+                    <span className="text-sm font-medium">Microphone</span>
+                  </div>
+                  <span className={`text-xs px-2 py-1 rounded-full ${isMuted ? (darkMode ? 'bg-red-600/30 text-red-300' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-green-600/30 text-green-300' : 'bg-green-100 text-green-700')}`}>
+                    {isMuted ? 'Off' : 'On'}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    handleCameraToggle()
+                    setShowMoreOptions(false)
+                  }}
+                  className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${cameraOff ? (darkMode ? 'bg-red-600/20 hover:bg-red-600/30 text-red-400' : 'bg-red-50 hover:bg-red-100 text-red-600') : (darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}`}
+                >
+                  <div className="flex items-center gap-3">
+                    {cameraOff ? <FiVideoOff className="w-5 h-5" /> : <FiVideo className="w-5 h-5" />}
+                    <span className="text-sm font-medium">Camera</span>
+                  </div>
+                  <span className={`text-xs px-2 py-1 rounded-full ${cameraOff ? (darkMode ? 'bg-red-600/30 text-red-300' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-green-600/30 text-green-300' : 'bg-green-100 text-green-700')}`}>
+                    {cameraOff ? 'Off' : 'On'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <div className={`h-px mx-4 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`} />
+
             {/* Screen Share */}
             <button
               onClick={() => {
@@ -725,64 +823,27 @@ const Call: React.FC = () => {
               <span className="text-sm font-medium">{showParticipants ? 'Hide Participants' : 'Show Participants'}</span>
             </button>
 
-            <div className={`h-px mx-4 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`} />
 
-            {/* Layout Options */}
-            <button
-              onClick={() => {
-                setLayout('sidebar')
-                setShowMoreOptions(false)
-              }}
-              className={`w-full px-4 py-3 flex items-center gap-3 rounded-none transition-colors duration-150 text-left ${layout === 'sidebar' ? (darkMode ? 'bg-blue-600/20 text-blue-400' : 'bg-blue-50 text-blue-600') : (darkMode ? 'hover:bg-gray-800 text-gray-100' : 'hover:bg-gray-100 text-gray-900')}`}
-            >
-              <FiList className="w-5 h-5" />
-              <span className="text-sm font-medium">Sidebar Layout</span>
-            </button>
 
-            <button
-              onClick={() => {
-                setLayout('tiled')
-                setShowMoreOptions(false)
-              }}
-              className={`w-full px-4 py-3 flex items-center gap-3 rounded-none transition-colors duration-150 text-left ${layout === 'tiled' ? (darkMode ? 'bg-blue-600/20 text-blue-400' : 'bg-blue-50 text-blue-600') : (darkMode ? 'hover:bg-gray-800 text-gray-100' : 'hover:bg-gray-100 text-gray-900')}`}
-            >
-              <FiGrid className="w-5 h-5" />
-              <span className="text-sm font-medium">Grid Layout</span>
-            </button>
-
-            <button
-              onClick={() => {
-                setLayout('spotlight')
-                setShowMoreOptions(false)
-              }}
-              className={`w-full px-4 py-3 flex items-center gap-3 rounded-none transition-colors duration-150 text-left ${layout === 'spotlight' ? (darkMode ? 'bg-blue-600/20 text-blue-400' : 'bg-blue-50 text-blue-600') : (darkMode ? 'hover:bg-gray-800 text-gray-100' : 'hover:bg-gray-100 text-gray-900')}`}
-            >
-              <FiMaximize2 className="w-5 h-5" />
-              <span className="text-sm font-medium">Spotlight Layout</span>
-            </button>
-
-            <div className={`h-px mx-4 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`} />
-
-            {/* Dark/Light Mode */}
-            <button
-              onClick={() => {
-                setDarkMode(!darkMode)
-                setShowMoreOptions(false)
-              }}
-              className={`w-full px-4 py-3 flex items-center transition-colors duration-150  ${darkMode ? 'hover:bg-gray-800 text-gray-100' : 'hover:bg-gray-100 text-gray-900'}`}
-            >
-              {darkMode ? (
-                <>
-                  <FiSun className="w-5 h-5" />
-                  <span className="text-sm font-medium">Light Mode</span>
-                </>
-              ) : (
-                <>
-                  <FiMoon className="w-5 h-5" />
-                  <span className="text-sm font-medium">Dark Mode</span>
-                </>
-              )}
-            </button>
+            {/* Appearance */}
+            <div className="px-4 py-3">
+              <label className={`text-xs font-medium mb-2 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Appearance</label>
+              <button
+                onClick={() => {
+                  setDarkMode(!darkMode)
+                  setShowMoreOptions(false)
+                }}
+                className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
+              >
+                <div className="flex items-center gap-3">
+                  {darkMode ? <FiMoon className="w-5 h-5" /> : <FiSun className="w-5 h-5" />}
+                  <span className="text-sm font-medium">Theme</span>
+                </div>
+                <span className={`text-xs px-2 py-1 rounded-full ${darkMode ? 'bg-blue-600/30 text-blue-300' : 'bg-yellow-100 text-yellow-700'}`}>
+                  {darkMode ? 'Dark' : 'Light'}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -792,27 +853,71 @@ const Call: React.FC = () => {
         <div className="fixed inset-0 z-40 hidden md:block" data-settings-dropdown>
           <div className="absolute inset-0 bg-black/30 backdrop-blur-sm w-full" onClick={() => setShowSettings(false)} />
           <div 
-            className={`absolute bottom-28 left-1/2 -translate-x-1/2 min-w-[220px] rounded-xl shadow-2xl py-2 z-10 transition-all duration-200 origin-bottom ${darkMode ? 'bg-gray-900/95 border border-gray-800 backdrop-blur-md' : 'bg-white/95 border border-gray-200 backdrop-blur-md'}`}
+            className={`absolute bottom-28 left-1/2 -translate-x-1/2 min-w-[280px] max-w-[320px] rounded-xl shadow-2xl py-3 z-10 transition-all duration-200 origin-bottom ${darkMode ? 'bg-gray-900/95 border border-gray-800 backdrop-blur-md' : 'bg-white/95 border border-gray-200 backdrop-blur-md'}`}
           >
-            <button
-              onClick={() => {
-                setDarkMode(!darkMode)
-                setShowSettings(false)
-              }}
-              className={`w-full px-4 py-2 flex items-center justify-center gap-3 transition-colors duration-150 whitespace-nowrap text-center ${darkMode ? 'hover:bg-gray-800 text-gray-100' : 'hover:bg-gray-100 text-gray-900'}`}
-            >
-              {darkMode ? (
-                <>
-                  <FiSun className="w-5 h-5" />
-                  <span className="text-sm font-medium">Light Mode</span>
-                </>
-              ) : (
-                <>
-                  <FiMoon className="w-5 h-5" />
-                  <span className="text-sm font-medium">Dark Mode</span>
-                </>
-              )}
-            </button>
+            <div className={`px-4 py-2 border-b ${darkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+              <h3 className={`text-sm font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Settings</h3>
+            </div>
+
+            {/* Audio Settings */}
+            <div className="px-4 py-3 space-y-3">
+              <div>
+                <label className={`text-xs font-medium mb-2 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Audio</label>
+                <div className="space-y-2">
+                  <button
+                    onClick={() => setIsMuted(!isMuted)}
+                    className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${isMuted ? (darkMode ? 'bg-red-600/20 hover:bg-red-600/30 text-red-400' : 'bg-red-50 hover:bg-red-100 text-red-600') : (darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {isMuted ? <FiMicOff className="w-4 h-4" /> : <FiMic className="w-4 h-4" />}
+                      <span className="text-sm">Microphone</span>
+                    </div>
+                    <span className={`text-xs px-2 py-1 rounded-full ${isMuted ? (darkMode ? 'bg-red-600/30 text-red-300' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-green-600/30 text-green-300' : 'bg-green-100 text-green-700')}`}>
+                      {isMuted ? 'Off' : 'On'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Video Settings */}
+              <div>
+                <label className={`text-xs font-medium mb-2 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Video</label>
+                <div className="space-y-2">
+                  <button
+                    onClick={handleCameraToggle}
+                    className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${cameraOff ? (darkMode ? 'bg-red-600/20 hover:bg-red-600/30 text-red-400' : 'bg-red-50 hover:bg-red-100 text-red-600') : (darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {cameraOff ? <FiVideoOff className="w-4 h-4" /> : <FiVideo className="w-4 h-4" />}
+                      <span className="text-sm">Camera</span>
+                    </div>
+                    <span className={`text-xs px-2 py-1 rounded-full ${cameraOff ? (darkMode ? 'bg-red-600/30 text-red-300' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-green-600/30 text-green-300' : 'bg-green-100 text-green-700')}`}>
+                      {cameraOff ? 'Off' : 'On'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Appearance */}
+              <div className={`pt-3 border-t ${darkMode ? 'border-gray-800' : 'border-gray-200'}`}>
+                <label className={`text-xs font-medium mb-2 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Appearance</label>
+                <button
+                  onClick={() => {
+                    setDarkMode(!darkMode)
+                    setShowSettings(false)
+                  }}
+                  className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
+                >
+                  <div className="flex items-center gap-2">
+                    {darkMode ? <FiMoon className="w-4 h-4" /> : <FiSun className="w-4 h-4" />}
+                    <span className="text-sm">Theme</span>
+                  </div>
+                  <span className={`text-xs px-2 py-1 rounded-full ${darkMode ? 'bg-blue-600/30 text-blue-300' : 'bg-yellow-100 text-yellow-700'}`}>
+                    {darkMode ? 'Dark' : 'Light'}
+                  </span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

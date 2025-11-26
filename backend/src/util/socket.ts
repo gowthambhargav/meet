@@ -8,10 +8,11 @@ type InitOptions = {
 export const initSocket = (server: HttpServer, opts?: InitOptions) => {
   const io = new Server(server, {
     cors: {
-      origin: opts?.origin || '*',
+      origin: opts?.origin || ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'],
       methods: ['GET', 'POST'],
       credentials: true,
     },
+    transports: ['websocket', 'polling'],
   })
 
   // Basic WebRTC signaling over Socket.IO

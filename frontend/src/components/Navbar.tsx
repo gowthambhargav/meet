@@ -23,7 +23,7 @@ const Navbar: React.FC = () => {
               <div className="w-10 h-10 flex items-center justify-center rounded-full bg-green-500 text-white font-bold">
                 RC
               </div>
-              <span className="text-lg font-semibold text-gray-800">RuralCall</span>
+              <span className="text-lg font-semibold text-gray-800">Live App</span>
             </a>
           </div>
 

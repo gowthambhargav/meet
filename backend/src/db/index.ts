@@ -6,12 +6,12 @@ dotenv.config()
 const ConnectDb = async ()=>{
 try {
 const dbUri= process.env.DB_URI;
-console.log(dbUri);
+console.log('DB URI:', dbUri);
 
 if(!dbUri) 
-    { console.log("Cant ge the dburi");
-     process.exit(1);
-     
+    { console.log("Warning: No DB_URI found in environment variables");
+      console.log("Add DB_URI=mongodb://localhost:27017/meet_app to your .env file");
+      return; // Don't exit, let the server run without DB for basic functionality
     }
 const connectionInstance = await mongoose.connect(`${dbUri}`);    
    console.log(
@@ -19,9 +19,10 @@ const connectionInstance = await mongoose.connect(`${dbUri}`);
     );
 } catch (error) {
     console.log('====================================');
-    console.log("MONGODB",error);
+    console.log("MONGODB connection error:",error);
     console.log('====================================');
-    process.exit(1);
+    console.log("Server will continue without database connection");
+    // Don't exit - let the server run for WebRTC functionality
 }
 };
 
