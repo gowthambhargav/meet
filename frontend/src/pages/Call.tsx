@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { API_URL, endMeeting as endMeetingApi, joinMeeting, leaveMeeting } from '../utils/api'
 import { io, Socket } from 'socket.io-client'
 import ParticipantsSidebar from '../components/ParticipantsSidebar'
-import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiMonitor, FiPhone, FiUsers, FiSettings, FiMoon, FiSun, FiMoreVertical, FiLink } from 'react-icons/fi'
+import { FiMic, FiMicOff, FiVideo, FiVideoOff, FiPhone, FiUsers, FiSettings, FiMoon, FiSun, FiMoreVertical, FiLink } from 'react-icons/fi'
 
 const Call: React.FC = () => {
   const savedMeeting = (() => {
@@ -10,7 +10,6 @@ const Call: React.FC = () => {
   })()
   const [isMuted, setIsMuted] = useState(!(savedMeeting?.audioOn ?? true))
   const [cameraOff, setCameraOff] = useState(!(savedMeeting?.cameraOn ?? true))
-  const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [showParticipants, setShowParticipants] = useState(false)
   const [showEndCallModal, setShowEndCallModal] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -22,6 +21,10 @@ const Call: React.FC = () => {
   })
   const [elapsed, setElapsed] = useState(0)
   const [stream, setStream] = useState<MediaStream | null>(null)
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([])
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([])
+  const [selectedAudioDevice, setSelectedAudioDevice] = useState<string>('')
+  const [selectedVideoDevice, setSelectedVideoDevice] = useState<string>('')
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const socketRef = useRef<Socket | null>(null)
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map())
@@ -32,14 +35,50 @@ const Call: React.FC = () => {
     localStorage.setItem('theme', darkMode ? 'dark' : 'light')
   }, [darkMode])
 
+  // Load available devices
+  useEffect(() => {
+    const loadDevices = async () => {
+      try {
+        // Request permissions first
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        stream.getTracks().forEach(track => track.stop())
+        
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        const audioInputs = devices.filter(device => device.kind === 'audioinput')
+        const videoInputs = devices.filter(device => device.kind === 'videoinput')
+        
+        setAudioDevices(audioInputs)
+        setVideoDevices(videoInputs)
+        
+        // Set default devices
+        if (audioInputs.length > 0 && !selectedAudioDevice) {
+          setSelectedAudioDevice(audioInputs[0].deviceId)
+        }
+        if (videoInputs.length > 0 && !selectedVideoDevice) {
+          setSelectedVideoDevice(videoInputs[0].deviceId)
+        }
+      } catch (error) {
+        console.error('Error loading devices:', error)
+      }
+    }
+
+    loadDevices()
+  }, [selectedAudioDevice, selectedVideoDevice])
+
+  // Handle device changes
+  useEffect(() => {
+    if (selectedAudioDevice || selectedVideoDevice) {
+      handleDeviceChange()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAudioDevice, selectedVideoDevice])
+
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       const target = event.target as Element
       
-      // Check if clicked outside settings dropdown
-      if (showSettings && !target.closest('[data-settings-dropdown]')) {
-        setShowSettings(false)
-      }
+      // Check if clicked outside settings modal
+   
       
       // Check if clicked outside more options dropdown
       if (showMoreOptions && !target.closest('[data-more-options]')) {
@@ -231,6 +270,44 @@ const Call: React.FC = () => {
   }, [hasAuth])
 
   // Debug helper for camera toggle
+  const handleDeviceChange = async () => {
+    if (!stream || cameraOff) return
+    
+    console.log('=== DEVICE CHANGE ===', {
+      selectedAudioDevice,
+      selectedVideoDevice,
+      hasStream: !!stream
+    })
+    
+    try {
+      // Get new stream with selected devices
+      const constraints = {
+        video: selectedVideoDevice ? { deviceId: { exact: selectedVideoDevice } } : true,
+        audio: selectedAudioDevice ? { deviceId: { exact: selectedAudioDevice } } : true,
+      }
+      
+      const newStream = await navigator.mediaDevices.getUserMedia(constraints)
+      
+      // Stop old stream
+      stream.getTracks().forEach(track => track.stop())
+      
+      // Apply mute state to new stream
+      newStream.getAudioTracks().forEach(track => track.enabled = !isMuted)
+      
+      // Update stream
+      setStream(newStream)
+      
+      // Update video element
+      if (videoRef.current) {
+        videoRef.current.srcObject = newStream
+      }
+      
+    } catch (error) {
+      console.error('Error switching devices:', error)
+    }
+  }
+
+  // Debug helper for camera toggle
   const handleCameraToggle = async () => {
     const newCameraState = !cameraOff
     console.log('=== CAMERA TOGGLE ===', { 
@@ -260,8 +337,8 @@ const Call: React.FC = () => {
         // Camera should be ON
         try {
           const newStream = await navigator.mediaDevices.getUserMedia({ 
-            video: true, 
-            audio: true 
+            video: selectedVideoDevice ? { deviceId: { exact: selectedVideoDevice } } : true, 
+            audio: selectedAudioDevice ? { deviceId: { exact: selectedAudioDevice } } : true 
           })
           
           if (isMounted) {
@@ -549,7 +626,7 @@ const Call: React.FC = () => {
             ? 'bg-gray-700/70 hover:bg-gray-600/80 text-white'
             : 'bg-gray-200 hover:bg-gray-300 text-gray-900';
     return (
-      <button aria-label={label} title={label} className={`${base} ${schemes} ${className}`} {...props}>
+      <button aria-label={label} title={label} className={`${base} ${schemes} ${className} cursor-pointer`} {...props}>
         {children}
       </button>
     )
@@ -585,7 +662,7 @@ const Call: React.FC = () => {
             <div className={`${showParticipants ? 'lg:col-span-3' : 'col-span-1'} rounded-xl sm:rounded-2xl overflow-hidden shadow-lg relative group transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
               <div className="w-full h-full bg-linear-to-br from-green-600 to-green-800 flex items-center justify-center relative overflow-hidden">
                 {stream && !cameraOff ? (
-                  <video ref={videoRef} autoPlay playsInline muted className="absolute inset-0 w-full h-full object-cover" />
+                  <video ref={videoRef} autoPlay playsInline  className="absolute inset-0 w-full h-full object-cover" />
                 ) : (
                 <div className="flex flex-col items-center">
                   <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full bg-green-700 flex items-center justify-center mb-2 sm:mb-4 ring-4 ring-green-500/30">
@@ -674,11 +751,6 @@ const Call: React.FC = () => {
               <IconBtn onClick={handleCameraToggle} danger={cameraOff} label={cameraOff ? 'Turn on camera' : 'Turn off camera'}>
                 {cameraOff ? <FiVideoOff className="w-6 h-6" /> : <FiVideo className="w-6 h-6" />}
               </IconBtn>
-
-              {/* Screen Share */}
-              <IconBtn onClick={() => setIsScreenSharing(!isScreenSharing)} success={isScreenSharing} label={isScreenSharing ? 'Stop sharing' : 'Share screen'}>
-                <FiMonitor className="w-6 h-6" />
-              </IconBtn>
             </div>
 
             <div className={`w-px h-8 ${darkMode ? 'bg-gray-600' : 'bg-gray-400'}`} />
@@ -694,8 +766,11 @@ const Call: React.FC = () => {
             <div className={`w-px h-8 ${darkMode ? 'bg-gray-600' : 'bg-gray-400'}`} />
 
             {/* Settings */}
-            <div className="relative" data-settings-dropdown>
-              <IconBtn onClick={() => setShowSettings(!showSettings)} active={showSettings} label="Settings">
+            <div className="relative cursor-pointer" data-settings-button>
+              <IconBtn onClick={() => {
+                console.log("Settings",showSettings)
+                setShowSettings(true);
+              }}  label="Settings">
                 <FiSettings className="w-6 h-6" />
               </IconBtn>
             </div>
@@ -795,21 +870,7 @@ const Call: React.FC = () => {
               </div>
             </div>
 
-            <div className={`h-px mx-4 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`} />
 
-            {/* Screen Share */}
-            <button
-              onClick={() => {
-                setIsScreenSharing(!isScreenSharing)
-                setShowMoreOptions(false)
-              }}
-              className={`w-full px-4 py-3 flex items-center gap-3 transition-colors duration-150 text-left ${darkMode ? 'hover:bg-gray-800 text-gray-100' : 'hover:bg-gray-100 text-gray-900'}`}
-            >
-              <FiMonitor className="w-5 h-5" />
-              <span className="text-sm font-medium">{isScreenSharing ? 'Stop Sharing' : 'Share Screen'}</span>
-            </button>
-
-            <div className={`h-px mx-4 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`} />
 
             {/* Show/Hide Participants */}
             <button
@@ -848,75 +909,162 @@ const Call: React.FC = () => {
         </div>
       )}
 
-      {/* Settings Dropdown - Desktop Only */}
+      {/* Settings Modal */}
       {showSettings && (
-        <div className="fixed inset-0 z-40 hidden md:block" data-settings-dropdown>
-          <div className="absolute inset-0 bg-black/30 backdrop-blur-sm w-full" onClick={() => setShowSettings(false)} />
-          <div 
-            className={`absolute bottom-28 left-1/2 -translate-x-1/2 min-w-[280px] max-w-[320px] rounded-xl shadow-2xl py-3 z-10 transition-all duration-200 origin-bottom ${darkMode ? 'bg-gray-900/95 border border-gray-800 backdrop-blur-md' : 'bg-white/95 border border-gray-200 backdrop-blur-md'}`}
-          >
-            <div className={`px-4 py-2 border-b ${darkMode ? 'border-gray-800' : 'border-gray-200'}`}>
-              <h3 className={`text-sm font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>Settings</h3>
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className={`rounded-xl sm:rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-white'}`} data-settings-modal>
+            {/* Header */}
+            <div className={`px-4 sm:px-6 py-3 sm:py-4 border-b flex items-center justify-between ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
+              <h2 className={`text-lg sm:text-xl font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>Settings</h2>
+              <button
+                onClick={() => setShowSettings(false)}
+                className={`p-1 rounded-lg transition-colors ${darkMode ? 'hover:bg-gray-700 text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
             </div>
 
-            {/* Audio Settings */}
-            <div className="px-4 py-3 space-y-3">
+            {/* Content */}
+            <div className="px-4 sm:px-6 py-4 space-y-6">
+              {/* Video Preview */}
               <div>
-                <label className={`text-xs font-medium mb-2 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Audio</label>
-                <div className="space-y-2">
-                  <button
-                    onClick={() => setIsMuted(!isMuted)}
-                    className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${isMuted ? (darkMode ? 'bg-red-600/20 hover:bg-red-600/30 text-red-400' : 'bg-red-50 hover:bg-red-100 text-red-600') : (darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}`}
-                  >
-                    <div className="flex items-center gap-2">
-                      {isMuted ? <FiMicOff className="w-4 h-4" /> : <FiMic className="w-4 h-4" />}
-                      <span className="text-sm">Microphone</span>
+                <label className={`text-sm font-medium mb-3 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Video Preview</label>
+                <div className={`relative rounded-xl overflow-hidden aspect-video max-w-sm mx-auto ${darkMode ? 'bg-gray-700' : 'bg-gray-200'}`}>
+                  {stream && !cameraOff ? (
+                    <video 
+                      autoPlay 
+                      playsInline 
+                      muted 
+                      className="w-full h-full object-cover"
+                      ref={(el) => {
+                        if (el && stream) {
+                          el.srcObject = stream
+                        }
+                      }}
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center h-full">
+                      <div className="w-12 h-12 rounded-full bg-green-600 flex items-center justify-center mb-2">
+                        <span className="text-lg font-bold text-white">{myInitials}</span>
+                      </div>
+                      <p className={`text-sm ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>Camera off</p>
                     </div>
-                    <span className={`text-xs px-2 py-1 rounded-full ${isMuted ? (darkMode ? 'bg-red-600/30 text-red-300' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-green-600/30 text-green-300' : 'bg-green-100 text-green-700')}`}>
-                      {isMuted ? 'Off' : 'On'}
-                    </span>
-                  </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Audio Settings */}
+              <div>
+                <label className={`text-sm font-medium mb-3 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Audio</label>
+                <div className="space-y-3">
+                  <div className={`flex items-center justify-between p-3 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                    <div className="flex items-center gap-3">
+                      {isMuted ? <FiMicOff className="w-5 h-5 text-red-500" /> : <FiMic className="w-5 h-5 text-green-500" />}
+                      <span className={`text-sm font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>Microphone</span>
+                    </div>
+                    <button
+                      onClick={() => setIsMuted(!isMuted)}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${isMuted ? 'bg-red-600' : 'bg-green-600'} ${darkMode ? 'focus:ring-offset-gray-800' : 'focus:ring-offset-white'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${isMuted ? 'translate-x-1' : 'translate-x-6'}`} />
+                    </button>
+                  </div>
+
+                  {/* Microphone Device Selection */}
+                  {audioDevices.length > 0 && (
+                    <div className={`p-3 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                      <label className={`text-sm font-medium mb-2 block ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>Microphone Device</label>
+                      <select
+                        value={selectedAudioDevice || ''}
+                        onChange={(e) => setSelectedAudioDevice(e.target.value)}
+                        className={`w-full px-3 py-2 rounded-lg text-sm border transition-colors ${
+                          darkMode 
+                            ? 'bg-gray-600 border-gray-500 text-gray-200 focus:border-green-500' 
+                            : 'bg-white border-gray-300 text-gray-900 focus:border-green-500'
+                        } focus:outline-none focus:ring-2 focus:ring-green-500/20`}
+                      >
+                        {audioDevices.map((device) => (
+                          <option key={device.deviceId} value={device.deviceId}>
+                            {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
               </div>
 
               {/* Video Settings */}
               <div>
-                <label className={`text-xs font-medium mb-2 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Video</label>
-                <div className="space-y-2">
-                  <button
-                    onClick={handleCameraToggle}
-                    className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${cameraOff ? (darkMode ? 'bg-red-600/20 hover:bg-red-600/30 text-red-400' : 'bg-red-50 hover:bg-red-100 text-red-600') : (darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700')}`}
-                  >
-                    <div className="flex items-center gap-2">
-                      {cameraOff ? <FiVideoOff className="w-4 h-4" /> : <FiVideo className="w-4 h-4" />}
-                      <span className="text-sm">Camera</span>
+                <label className={`text-sm font-medium mb-3 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Video</label>
+                <div className="space-y-3">
+                  <div className={`flex items-center justify-between p-3 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                    <div className="flex items-center gap-3">
+                      {cameraOff ? <FiVideoOff className="w-5 h-5 text-red-500" /> : <FiVideo className="w-5 h-5 text-green-500" />}
+                      <span className={`text-sm font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>Camera</span>
                     </div>
-                    <span className={`text-xs px-2 py-1 rounded-full ${cameraOff ? (darkMode ? 'bg-red-600/30 text-red-300' : 'bg-red-100 text-red-700') : (darkMode ? 'bg-green-600/30 text-green-300' : 'bg-green-100 text-green-700')}`}>
-                      {cameraOff ? 'Off' : 'On'}
-                    </span>
-                  </button>
+                    <button
+                      onClick={handleCameraToggle}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${cameraOff ? 'bg-red-600' : 'bg-green-600'} ${darkMode ? 'focus:ring-offset-gray-800' : 'focus:ring-offset-white'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${cameraOff ? 'translate-x-1' : 'translate-x-6'}`} />
+                    </button>
+                  </div>
+
+                  {/* Camera Device Selection */}
+                  {videoDevices.length > 0 && (
+                    <div className={`p-3 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                      <label className={`text-sm font-medium mb-2 block ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>Camera Device</label>
+                      <select
+                        value={selectedVideoDevice || ''}
+                        onChange={(e) => setSelectedVideoDevice(e.target.value)}
+                        className={`w-full px-3 py-2 rounded-lg text-sm border transition-colors ${
+                          darkMode 
+                            ? 'bg-gray-600 border-gray-500 text-gray-200 focus:border-green-500' 
+                            : 'bg-white border-gray-300 text-gray-900 focus:border-green-500'
+                        } focus:outline-none focus:ring-2 focus:ring-green-500/20`}
+                      >
+                        {videoDevices.map((device) => (
+                          <option key={device.deviceId} value={device.deviceId}>
+                            {device.label || `Camera ${device.deviceId.slice(0, 8)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* Appearance */}
-              <div className={`pt-3 border-t ${darkMode ? 'border-gray-800' : 'border-gray-200'}`}>
-                <label className={`text-xs font-medium mb-2 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Appearance</label>
-                <button
-                  onClick={() => {
-                    setDarkMode(!darkMode)
-                    setShowSettings(false)
-                  }}
-                  className={`w-full px-3 py-2 rounded-lg flex items-center justify-between transition-colors ${darkMode ? 'bg-gray-800 hover:bg-gray-700 text-gray-200' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
-                >
-                  <div className="flex items-center gap-2">
-                    {darkMode ? <FiMoon className="w-4 h-4" /> : <FiSun className="w-4 h-4" />}
-                    <span className="text-sm">Theme</span>
+              {/* Appearance Settings */}
+              <div>
+                <label className={`text-sm font-medium mb-3 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Appearance</label>
+                <div className="space-y-3">
+                  <div className={`flex items-center justify-between p-3 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                    <div className="flex items-center gap-3">
+                      {darkMode ? <FiMoon className="w-5 h-5" /> : <FiSun className="w-5 h-5" />}
+                      <span className={`text-sm font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>Dark Mode</span>
+                    </div>
+                    <button
+                      onClick={() => setDarkMode(!darkMode)}
+                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${darkMode ? 'bg-blue-600' : 'bg-gray-400'} ${darkMode ? 'focus:ring-offset-gray-800' : 'focus:ring-offset-white'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${darkMode ? 'translate-x-6' : 'translate-x-1'}`} />
+                    </button>
                   </div>
-                  <span className={`text-xs px-2 py-1 rounded-full ${darkMode ? 'bg-blue-600/30 text-blue-300' : 'bg-yellow-100 text-yellow-700'}`}>
-                    {darkMode ? 'Dark' : 'Light'}
-                  </span>
-                </button>
+                </div>
               </div>
+            </div>
+
+            {/* Footer */}
+            <div className={`px-4 sm:px-6 py-3 sm:py-4 border-t ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
+              <button
+                onClick={() => setShowSettings(false)}
+                className={`w-full px-4 py-2 rounded-lg font-medium transition-colors ${darkMode ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-green-600 hover:bg-green-700 text-white'}`}
+              >
+                Done
+              </button>
             </div>
           </div>
         </div>
@@ -932,7 +1080,7 @@ const Call: React.FC = () => {
             <div className="flex gap-2 sm:gap-3">
               <button
                 onClick={() => {
-                  setShowSettings(false)
+                  // setShowSettings(false)
                   setShowEndCallModal(false)
                 }}
                 className={`flex-1 px-3 py-2 sm:px-4 sm:py-2 font-semibold rounded-lg transition text-sm sm:text-base ${darkMode ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-gray-200 hover:bg-gray-300 text-gray-900'}`}
