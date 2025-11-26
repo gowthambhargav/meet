@@ -25,6 +25,7 @@ const Call: React.FC = () => {
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([])
   const [selectedAudioDevice, setSelectedAudioDevice] = useState<string>('')
   const [selectedVideoDevice, setSelectedVideoDevice] = useState<string>('')
+  const [volume, setVolume] = useState<number>(100)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const socketRef = useRef<Socket | null>(null)
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map())
@@ -105,26 +106,50 @@ const Call: React.FC = () => {
     `
     document.head.appendChild(style)
     
-    // Unlock audio context on first user interaction
+    // Unlock audio context immediately and on user interactions
     const unlockAudio = async () => {
       try {
-        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext
+        if (!AudioContext) {
+          console.warn('AudioContext not supported')
+          return
+        }
+        
+        const audioContext = new AudioContext()
         if (audioContext.state === 'suspended') {
           await audioContext.resume()
-          console.log('Audio context unlocked')
+          console.log('Audio context unlocked successfully')
+        } else {
+          console.log('Audio context already running:', audioContext.state)
         }
+        
+        // Close the context as we just needed to unlock it
+        await audioContext.close()
       } catch (error) {
-        console.log('Audio context unlock failed:', error)
+        console.warn('Audio context unlock failed:', error)
       }
     }
     
-    document.addEventListener('click', unlockAudio, { once: true })
-    document.addEventListener('touchstart', unlockAudio, { once: true })
+    // Try to unlock immediately
+    unlockAudio()
+    
+    // Also unlock on user interactions
+    const unlockOnInteraction = () => {
+      unlockAudio()
+      document.removeEventListener('click', unlockOnInteraction)
+      document.removeEventListener('touchstart', unlockOnInteraction)
+      document.removeEventListener('keydown', unlockOnInteraction)
+    }
+    
+    document.addEventListener('click', unlockOnInteraction)
+    document.addEventListener('touchstart', unlockOnInteraction)
+    document.addEventListener('keydown', unlockOnInteraction)
     
     return () => {
       document.head.removeChild(style)
-      document.removeEventListener('click', unlockAudio)
-      document.removeEventListener('touchstart', unlockAudio)
+      document.removeEventListener('click', unlockOnInteraction)
+      document.removeEventListener('touchstart', unlockOnInteraction)
+      document.removeEventListener('keydown', unlockOnInteraction)
     }
   }, [])
 
@@ -371,6 +396,17 @@ const Call: React.FC = () => {
     setParticipants(finalParticipants)
   }, [remotePeers, currentParticipants, myName, myInitials, userId])
 
+  // Update volume of all audio elements when volume changes
+  useEffect(() => {
+    remotePeers.forEach(rp => {
+      const audioElement = document.getElementById(`audio-${rp.socketId}`) as HTMLAudioElement
+      if (audioElement) {
+        audioElement.volume = volume / 100
+        console.log(`Updated volume to ${volume}% for peer ${rp.socketId}`)
+      }
+    })
+  }, [volume, remotePeers])
+
   // Default open participants sidebar if unauthenticated
   useEffect(() => {
     if (!hasAuth) setShowParticipants(true)
@@ -602,6 +638,20 @@ const Call: React.FC = () => {
           pc.close() 
         } catch {}
       }
+      
+      // Cleanup audio element
+      const audioElement = document.getElementById(`audio-${sid}`) as HTMLAudioElement
+      if (audioElement) {
+        try {
+          audioElement.pause()
+          audioElement.srcObject = null
+          audioElement.remove()
+          console.log(`Removed audio element for ${sid}`)
+        } catch (error) {
+          console.warn(`Failed to cleanup audio element for ${sid}:`, error)
+        }
+      }
+      
       peersRef.current.delete(sid)
       peerInfoRef.current.delete(sid)
       peerStreamsRef.current.delete(sid)
@@ -634,13 +684,58 @@ const Call: React.FC = () => {
           console.log(`No remote stream received for ${targetSocketId}`)
           return
         }
-        console.log(`Remote stream received for ${targetSocketId}:`, { streamId: remoteStream.id, tracks: remoteStream.getTracks().length })
-        
-        // Ensure audio tracks are enabled by default
-        remoteStream.getAudioTracks().forEach(track => {
-          track.enabled = true
-          console.log(`Audio track enabled for ${targetSocketId}:`, track.enabled)
+        console.log(`Remote stream received for ${targetSocketId}:`, { 
+          streamId: remoteStream.id, 
+          tracks: remoteStream.getTracks().length,
+          audioTracks: remoteStream.getAudioTracks().length,
+          videoTracks: remoteStream.getVideoTracks().length
         })
+        
+        // Ensure all audio tracks are enabled and unmuted
+        remoteStream.getAudioTracks().forEach((track, index) => {
+          track.enabled = true
+          console.log(`Audio track ${index} for ${targetSocketId}:`, {
+            enabled: track.enabled,
+            readyState: track.readyState,
+            muted: track.muted,
+            id: track.id
+          })
+        })
+        
+        // Create dedicated audio element for this peer
+        const audioElement = document.createElement('audio')
+        audioElement.srcObject = remoteStream
+        audioElement.autoplay = true
+        audioElement.muted = false
+        audioElement.volume = volume / 100 // Apply volume setting
+        audioElement.id = `audio-${targetSocketId}`
+        
+        // Add to DOM (hidden) for audio playback
+        audioElement.style.display = 'none'
+        document.body.appendChild(audioElement)
+        
+        // Play audio with user gesture unlock
+        const playAudio = async () => {
+          try {
+            await audioElement.play()
+            console.log(`Audio playing for ${targetSocketId}`)
+          } catch (error) {
+            console.warn(`Audio play failed for ${targetSocketId}:`, error)
+            // Try to unlock audio context and retry
+            try {
+              const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+              if (audioContext.state === 'suspended') {
+                await audioContext.resume()
+                console.log('Audio context resumed, retrying audio play')
+                await audioElement.play()
+              }
+            } catch (retryError) {
+              console.warn(`Audio retry failed for ${targetSocketId}:`, retryError)
+            }
+          }
+        }
+        
+        playAudio()
         
         peerStreamsRef.current.set(targetSocketId, remoteStream)
         const info = peerInfoRef.current.get(targetSocketId)
@@ -652,7 +747,7 @@ const Call: React.FC = () => {
             return prev.map(p => p.socketId === targetSocketId ? { 
               ...p, 
               stream: remoteStream,
-              name: info?.name || p.name || p.userId || 'Remote User', // Preserve the best available name
+              name: info?.name || p.name || p.userId || 'Remote User',
               userId: info?.userId || p.userId
             } : p)
           }
@@ -956,14 +1051,14 @@ const Call: React.FC = () => {
                                   })
                                   ;(el as any).srcObject = rp.stream
                                   
-                                  // Set volume to 100% and ensure it's not muted
-                                  el.volume = 1.0
+                                  // Configure audio properly
+                                  el.volume = volume / 100 // Apply volume setting
                                   el.muted = false
                                   
                                   // Ensure audio tracks are enabled
                                   rp.stream.getAudioTracks().forEach(track => {
                                     track.enabled = true
-                                    console.log(`Enabled audio track for ${participantName}:`, track.enabled)
+                                    console.log(`Video element - enabled audio track for ${participantName}:`, track.enabled)
                                   })
                                   
                                   // Ensure video plays
@@ -1325,6 +1420,38 @@ const Call: React.FC = () => {
                       </select>
                     </div>
                   )}
+                </div>
+              </div>
+
+              {/* Appearance Settings */}
+              <div>
+                <label className={`text-sm font-medium mb-3 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Volume Control</label>
+                <div className="space-y-3">
+                  <div className={`p-3 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+                    <label className={`text-sm font-medium mb-2 block ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>Remote Audio Volume</label>
+                    <div className="flex items-center gap-3">
+                      <svg className="w-4 h-4 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.617.82L4.5 13.5H2a1 1 0 01-1-1v-5a1 1 0 011-1h2.5l3.883-3.32a1 1 0 011.617.82zM6 8.98L8 7.5v5l-2-1.48H3v-3h3.02zM13 8a1 1 0 011.414 0L15.5 9.086 16.586 8A1 1 0 0118 9.414l-1.086 1.086L18 11.586A1 1 0 0116.586 13L15.5 11.914 14.414 13A1 1 0 0113 11.586l1.086-1.086L13 9.414A1 1 0 0113 8z" clipRule="evenodd" /></svg>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={volume}
+                        onChange={(e) => setVolume(Number(e.target.value))}
+                        className={`flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer ${darkMode ? 'bg-gray-600' : 'bg-gray-200'}`}
+                        style={{
+                          background: `linear-gradient(to right, #10b981 0%, #10b981 ${volume}%, ${darkMode ? '#374151' : '#e5e7eb'} ${volume}%, ${darkMode ? '#374151' : '#e5e7eb'} 100%)`
+                        }}
+                      />
+                      <svg className="w-4 h-4 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 3a1 1 0 011 1v1.323l3.954 1.582 1.599-.8A1 1 0 0118 7v6a1 1 0 01-1.447.894l-1.599-.8L11 14.677V16a1 1 0 11-2 0v-1.323l-3.954-1.582-1.599.8A1 1 0 012 13V7a1 1 0 011.447-.894l1.599.8L9 8.323V4a1 1 0 011-1z" clipRule="evenodd" /></svg>
+                    </div>
+                    <div className="flex justify-between text-xs mt-1">
+                      <span className={darkMode ? 'text-gray-400' : 'text-gray-500'}>Muted</span>
+                      <span className={`font-medium ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>{volume}%</span>
+                      <span className={darkMode ? 'text-gray-400' : 'text-gray-500'}>Loud</span>
+                    </div>
+                  </div>
                 </div>
               </div>
 
