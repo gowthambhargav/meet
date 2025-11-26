@@ -92,7 +92,7 @@ const Call: React.FC = () => {
   }, [showSettings, showMoreOptions])
 
   useEffect(() => {
-    // Add scrollbar hiding styles
+    // Add scrollbar hiding styles and unlock audio context
     const style = document.createElement('style')
     style.textContent = `
       .scrollbar-hide {
@@ -105,8 +105,26 @@ const Call: React.FC = () => {
     `
     document.head.appendChild(style)
     
+    // Unlock audio context on first user interaction
+    const unlockAudio = async () => {
+      try {
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume()
+          console.log('Audio context unlocked')
+        }
+      } catch (error) {
+        console.log('Audio context unlock failed:', error)
+      }
+    }
+    
+    document.addEventListener('click', unlockAudio, { once: true })
+    document.addEventListener('touchstart', unlockAudio, { once: true })
+    
     return () => {
       document.head.removeChild(style)
+      document.removeEventListener('click', unlockAudio)
+      document.removeEventListener('touchstart', unlockAudio)
     }
   }, [])
 
@@ -130,12 +148,16 @@ const Call: React.FC = () => {
   const shareUrl = savedMeeting?.shareUrl || (queryMeetingId ? `${window.location.origin}/call?m=${queryMeetingId}` : '')
   const hasAuth = (() => { try { return !!JSON.parse(localStorage.getItem('auth')||'null') } catch { return false } })()
 
-  // Resolve current user id (auth or guest) and persist guest id
-  const resolveUserId = () => {
+  // Resolve current user id and name (auth or guest) and persist guest id
+  const resolveUserInfo = () => {
     let userId = ''
+    let userName = ''
     try {
       const auth = JSON.parse(localStorage.getItem('auth') || 'null')
-      userId = auth?.user?._id || auth?._id || auth?.userId || auth?.id || ''
+      // Extract from the correct auth structure
+      userId = auth?._id || auth?.user?._id || auth?.userId || auth?.id || ''
+      userName = auth?.username || auth?.user?.username || auth?.name || auth?.user?.name || auth?.displayName || ''
+      console.log('Auth user info:', { userId, userName, auth })
     } catch {}
     if (!userId) {
       let gid = localStorage.getItem('rc_guest_id')
@@ -144,15 +166,19 @@ const Call: React.FC = () => {
         localStorage.setItem('rc_guest_id', gid)
       }
       userId = gid
+      // For guests, use saved name or fallback
+      userName = localStorage.getItem('rc_name') || 'Guest'
     }
-    return userId
+    return { userId, userName }
   }
-  const userId = resolveUserId()
+  const { userId, userName: authUserName } = resolveUserInfo()
 
   // If no savedMeeting but we have query id, construct a lightweight one (guest)
   useEffect(() => {
     if (!savedMeeting && queryMeetingId) {
-      const guestName = localStorage.getItem('rc_name') || 'Guest'
+      // Prioritize auth name for guest meeting creation
+      const guestName = authUserName || localStorage.getItem('rc_name') || 'Guest'
+      console.log('Creating guest meeting with name:', guestName, 'from auth:', !!authUserName)
       const fallback = { id: queryMeetingId, host: false, name: guestName, cameraOn: true, audioOn: true, shareUrl }
       localStorage.setItem('rc_current_meeting', JSON.stringify(fallback))
     }
@@ -163,9 +189,10 @@ const Call: React.FC = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Participants state loaded from backend
-  type ViewParticipant = { id: number; name: string; initials: string; isSpeaking: boolean }
+  // Participants state with proper name tracking
+  type ViewParticipant = { id: number; name: string; initials: string; isSpeaking: boolean; isLocal?: boolean; socketId?: string }
   const [participants, setParticipants] = useState<ViewParticipant[]>([])
+  const [currentParticipants, setCurrentParticipants] = useState<Array<{socketId: string, userId: string, name: string}>>([])
   type RemotePeer = { socketId: string; userId?: string; name?: string; stream: MediaStream }
   const [remotePeers, setRemotePeers] = useState<RemotePeer[]>([])
 
@@ -177,22 +204,45 @@ const Call: React.FC = () => {
 
     const doJoin = async () => {
       try {
-        const name = (savedMeeting?.name || localStorage.getItem('rc_name') || 'Guest').toString()
+        // Prioritize auth name, then saved meeting name, then localStorage name, then guest fallback
+        const name = (authUserName || savedMeeting?.name || localStorage.getItem('rc_name') || 'Guest').toString()
+        console.log('Joining meeting with name:', name, 'from auth:', authUserName)
         const res: any = await joinMeeting({ roomId: queryMeetingId, userId, name })
+        
+        // Store current participants from server response
         if (res?.participants && Array.isArray(res.participants)) {
-          const mapped: ViewParticipant[] = res.participants.map((p: any, idx: number) => {
-            const nm: string = p.name || p.userId || `User${idx+1}`
+          const serverParticipants = res.participants.map((p: any) => ({
+            socketId: p.socketId || p.userId || '',
+            userId: p.userId || p.id || '',
+            name: p.name || 'Unknown User'
+          }))
+          setCurrentParticipants(serverParticipants)
+          
+          // Update participants view with proper names
+          const localUser: ViewParticipant = {
+            id: 0,
+            name: name,
+            initials: name.split(' ').map((s: string) => s[0]).slice(0, 2).join('').toUpperCase() || 'YO',
+            isSpeaking: false,
+            isLocal: true,
+            socketId: 'local'
+          }
+          
+          const mapped: ViewParticipant[] = serverParticipants.map((p: any, idx: number) => {
+            const displayName = p.name || p.userId || `User${idx+1}`
             return {
               id: idx + 1,
-              name: nm,
-              initials: nm.split(' ').map((s: string)=>s[0]).slice(0,2).join('').toUpperCase(),
-              isSpeaking: false
+              name: displayName,
+              initials: displayName.split(' ').map((s: string) => s[0]).slice(0, 2).join('').toUpperCase(),
+              isSpeaking: false,
+              socketId: p.socketId
             }
           })
-          setParticipants(mapped)
+          
+          setParticipants([localUser, ...mapped])
         }
       } catch (e) {
-        // Non-blocking
+        console.error('Failed to join meeting:', e)
       }
     }
 
@@ -250,19 +300,76 @@ const Call: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryMeetingId, userId])
 
-  // Update participants based on WebRTC connections only
+  // Prioritize auth name for current user display
+  const myName = authUserName || savedMeeting?.name || localStorage.getItem('rc_name') || 'You'
+  const myInitials = myName.split(' ').map((s: string) => s[0]).slice(0,2).join('').toUpperCase() || 'YO'
+  console.log('Current user display name:', myName, 'from auth:', authUserName)
+
+  // Update participants based on current connections and maintain proper names
   useEffect(() => {
-    const remoteMapped: ViewParticipant[] = remotePeers.map((rp, idx) => {
-      const nm = rp.name || rp.userId || `Remote${idx+1}`
-      return {
-        id: idx + 1,
-        name: nm,
-        initials: nm.split(' ').map((s: string)=>s[0]).slice(0,2).join('').toUpperCase(),
-        isSpeaking: false
-      }
+    console.log('=== PARTICIPANT UPDATE ===', {
+      remotePeers: remotePeers.map(rp => ({ socketId: rp.socketId, name: rp.name, hasStream: !!rp.stream })),
+      currentParticipants: currentParticipants,
+      myName,
+      myUserId: userId
     })
-    setParticipants(remoteMapped)
-  }, [remotePeers])
+    
+    const localUser: ViewParticipant = {
+      id: 0,
+      name: myName,
+      initials: myInitials,
+      isSpeaking: false,
+      isLocal: true,
+      socketId: 'local'
+    }
+    
+    // Combine remote peers and current participants with proper name resolution
+    const allRemoteParticipants = new Map<string, ViewParticipant>()
+    
+    // Add remote peers (they have streams) with proper names
+    remotePeers
+      .filter(rp => rp.socketId && rp.socketId.trim() !== '')
+      .forEach((rp, idx) => {
+        // Get the actual name from multiple sources
+        const peerInfo = peerInfoRef.current.get(rp.socketId)
+        const displayName = peerInfo?.name || rp.name || rp.userId || 'Remote User'
+        
+        console.log(`Adding remote peer ${rp.socketId}:`, { 
+          name: displayName, 
+          peerInfoName: peerInfo?.name,
+          rpName: rp.name,
+          hasStream: !!rp.stream 
+        })
+        
+        allRemoteParticipants.set(rp.socketId, {
+          id: idx + 1,
+          name: displayName,
+          initials: displayName.split(' ').map((s: string) => s[0]).slice(0, 2).join('').toUpperCase(),
+          isSpeaking: false,
+          socketId: rp.socketId
+        })
+      })
+    
+    // Add current participants that don't have peer connections yet
+    currentParticipants
+      .filter(cp => cp.socketId && !allRemoteParticipants.has(cp.socketId))
+      .forEach((cp) => {
+        const displayName = cp.name || cp.userId || 'Connecting User'
+        console.log(`Adding current participant ${cp.socketId}:`, { name: displayName })
+        
+        allRemoteParticipants.set(cp.socketId, {
+          id: allRemoteParticipants.size + 1,
+          name: displayName,
+          initials: displayName.split(' ').map((s: string) => s[0]).slice(0, 2).join('').toUpperCase(),
+          isSpeaking: false,
+          socketId: cp.socketId
+        })
+      })
+    
+    const finalParticipants = [localUser, ...Array.from(allRemoteParticipants.values())]
+    console.log('Final participants with socket IDs only:', finalParticipants)
+    setParticipants(finalParticipants)
+  }, [remotePeers, currentParticipants, myName, myInitials, userId])
 
   // Default open participants sidebar if unauthenticated
   useEffect(() => {
@@ -319,9 +426,6 @@ const Call: React.FC = () => {
     })
     setCameraOff(!cameraOff)
   }
-
-  const myName = savedMeeting?.name || localStorage.getItem('rc_name') || 'You'
-  const myInitials = myName.split(' ').map((s: string) => s[0]).slice(0,2).join('').toUpperCase() || 'YO'
 
   // Debug stream and camera state changes
 
@@ -442,14 +546,21 @@ const Call: React.FC = () => {
     }
 
     const addLocalTracks = (pc: RTCPeerConnection) => {
-      if (!stream) return
+      if (!stream) {
+        console.log('No local stream to add to peer connection')
+        return
+      }
       try {
+        console.log('Adding local tracks to peer connection:', stream.getTracks().length, 'tracks')
         stream.getTracks().forEach(track => {
           try {
             // Check if track is already added
             const existingSender = pc.getSenders().find(sender => sender.track === track)
             if (!existingSender) {
+              console.log('Adding track:', track.kind, track.id)
               pc.addTrack(track, stream)
+            } else {
+              console.log('Track already exists:', track.kind, track.id)
             }
           } catch (e) {
             console.warn('Failed to add track:', e)
@@ -498,26 +609,60 @@ const Call: React.FC = () => {
     }
 
     const createPeer = async (targetSocketId: string, initiator: boolean, meta?: { userId?: string; name?: string }) => {
-      if (peersRef.current.has(targetSocketId)) return peersRef.current.get(targetSocketId)!
+      if (peersRef.current.has(targetSocketId)) {
+        console.log(`Peer connection already exists for ${targetSocketId}`)
+        return peersRef.current.get(targetSocketId)!
+      }
+      
+      console.log(`Creating peer connection for ${targetSocketId}, initiator: ${initiator}`, meta)
       const pc = new RTCPeerConnection(rtcConfig)
       peersRef.current.set(targetSocketId, pc)
       if (meta) peerInfoRef.current.set(targetSocketId, meta)
+      
+      // Add local tracks if we have them
       addLocalTracks(pc)
 
       pc.onicecandidate = (ev) => {
         if (ev.candidate) {
+          console.log(`Sending ICE candidate to ${targetSocketId}`)
           socket.emit('signal', { to: targetSocketId, data: { type: 'candidate', candidate: ev.candidate } })
         }
       }
       pc.ontrack = (ev) => {
         const [remoteStream] = ev.streams
-        if (!remoteStream) return
+        if (!remoteStream) {
+          console.log(`No remote stream received for ${targetSocketId}`)
+          return
+        }
+        console.log(`Remote stream received for ${targetSocketId}:`, { streamId: remoteStream.id, tracks: remoteStream.getTracks().length })
+        
+        // Ensure audio tracks are enabled by default
+        remoteStream.getAudioTracks().forEach(track => {
+          track.enabled = true
+          console.log(`Audio track enabled for ${targetSocketId}:`, track.enabled)
+        })
+        
         peerStreamsRef.current.set(targetSocketId, remoteStream)
         const info = peerInfoRef.current.get(targetSocketId)
+        
         setRemotePeers(prev => {
           const existing = prev.find(p => p.socketId === targetSocketId)
-          if (existing) return prev.map(p => p.socketId === targetSocketId ? { ...p, stream: remoteStream } : p)
-          return [...prev, { socketId: targetSocketId, userId: info?.userId, name: info?.name, stream: remoteStream }]
+          if (existing) {
+            console.log(`Updating existing peer ${targetSocketId} with new stream and name:`, info?.name)
+            return prev.map(p => p.socketId === targetSocketId ? { 
+              ...p, 
+              stream: remoteStream,
+              name: info?.name || p.name || p.userId || 'Remote User', // Preserve the best available name
+              userId: info?.userId || p.userId
+            } : p)
+          }
+          console.log(`Adding new remote peer ${targetSocketId}:`, { userId: info?.userId, name: info?.name })
+          return [...prev, { 
+            socketId: targetSocketId, 
+            userId: info?.userId, 
+            name: info?.name || 'Remote User', 
+            stream: remoteStream 
+          }]
         })
       }
       pc.onconnectionstatechange = () => {
@@ -556,28 +701,102 @@ const Call: React.FC = () => {
     }
 
     socket.on('connect', () => {
-      const name = (savedMeeting?.name || localStorage.getItem('rc_name') || 'Guest').toString()
+      console.log('=== SOCKET CONNECTED ===', {
+        socketId: socket.id,
+        userId,
+        myName,
+        authUserName,
+        roomId: queryMeetingId
+      })
+      // Use authenticated user name for socket connection
+      const name = (authUserName || savedMeeting?.name || localStorage.getItem('rc_name') || 'Guest').toString()
+      console.log('Joining room with auth name:', { roomId: queryMeetingId, userId, name, fromAuth: !!authUserName })
       socket.emit('join-room', { roomId: queryMeetingId, userId, name })
     })
+    
+    socket.on('disconnect', (reason) => {
+      console.log('=== SOCKET DISCONNECTED ===', { reason, socketId: socket.id })
+    })
+    
+    socket.on('reconnect', () => {
+      console.log('=== SOCKET RECONNECTED ===', { socketId: socket.id, authUserName })
+      // Use authenticated user name for reconnection
+      const name = (authUserName || savedMeeting?.name || localStorage.getItem('rc_name') || 'Guest').toString()
+      console.log('Reconnecting with auth name:', name, 'from auth:', !!authUserName)
+      socket.emit('join-room', { roomId: queryMeetingId, userId, name })
+    })
+    
+    socket.on('room-joined', ({ participants: roomParticipants }: { participants?: any[] }) => {
+      console.log('=== ROOM JOINED ===', { roomParticipants })
+      if (roomParticipants && Array.isArray(roomParticipants)) {
+        const serverParticipants = roomParticipants
+          .filter(p => p.userId !== userId) // Exclude self
+          .map((p: any) => ({
+            socketId: p.socketId || p.userId || '',
+            userId: p.userId || p.id || '',
+            name: p.name || 'Unknown User'
+          }))
+        console.log('Setting existing participants:', serverParticipants)
+        setCurrentParticipants(serverParticipants)
+      }
+    })
     socket.on('user-joined', ({ userId: uid, name: uname, socketId }: { userId?: string; name?: string; socketId: string }) => {
+      console.log('=== USER JOINED ===', { socketId, userId: uid, name: uname, myUserId: userId })
+      
+      // Don't add ourselves
+      if (uid === userId) {
+        console.log('Ignoring self join event')
+        return
+      }
+      
       peerInfoRef.current.set(socketId, { userId: uid, name: uname })
+      
+      // Add to current participants list
+      setCurrentParticipants(prev => {
+        const existing = prev.find(p => p.socketId === socketId || p.userId === uid)
+        if (existing) {
+          console.log('User already exists in participants:', existing)
+          return prev
+        }
+        const newParticipant = { socketId, userId: uid || '', name: uname || 'Unknown User' }
+        console.log('Adding new participant:', newParticipant)
+        return [...prev, newParticipant]
+      })
+      
       createPeer(socketId, true, { userId: uid, name: uname })
     })
     socket.on('signal', handleSignal)
-    socket.on('user-left', ({ socketId }: { socketId: string }) => {
-      cleanupPeer(socketId)
+    socket.on('user-left', ({ socketId, userId: leftUserId }: { socketId?: string; userId?: string }) => {
+      console.log('=== USER LEFT ===', { socketId, userId: leftUserId })
+      
+      // Remove from current participants by both socketId and userId
+      setCurrentParticipants(prev => {
+        const filtered = prev.filter(p => {
+          const matchSocket = socketId && p.socketId === socketId
+          const matchUser = leftUserId && p.userId === leftUserId
+          return !(matchSocket || matchUser)
+        })
+        console.log('Remaining participants after leave:', filtered)
+        return filtered
+      })
+      
+      // Clean up peer connection
+      if (socketId) {
+        cleanupPeer(socketId)
+      }
     })
     socket.on('meeting-ended', () => {
       try { peersRef.current.forEach((_, sid) => cleanupPeer(sid)) } finally { window.location.href = '/thankyou' }
     })
 
     return () => {
+      console.log('=== CLEANING UP SOCKET ===', { queryMeetingId, userId })
       try { socket.emit('leave-room', { roomId: queryMeetingId, userId }) } catch {}
-      try { socket.off('user-joined'); socket.off('signal'); socket.off('user-left'); socket.off('meeting-ended'); socket.disconnect() } catch {}
+      try { socket.off('user-joined'); socket.off('signal'); socket.off('user-left'); socket.off('meeting-ended'); socket.off('room-joined'); socket.off('disconnect'); socket.off('reconnect'); socket.disconnect() } catch {}
       peersRef.current.forEach((_, sid) => cleanupPeer(sid))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryMeetingId, userId])
+  }, [queryMeetingId, userId, stream])
 
   // Update peer connections when stream changes (camera toggle)
   useEffect(() => {
@@ -650,64 +869,136 @@ const Call: React.FC = () => {
           onClick={() => setShowParticipants(v => !v)}
           className={`text-xs sm:text-sm px-2 sm:px-3 py-1 rounded-full transition ${darkMode ? 'bg-gray-800 text-gray-200 hover:bg-gray-700' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
         >
-          {showParticipants ? 'Hide' : 'Show'} participants · {participants.length}
+          {showParticipants ? 'Hide' : 'Show'} participants · {participants.length} {participants.length === 1 ? 'person' : 'people'}
         </button>
       </div>
 
       {/* Main Video Area */}
-  <div className={`flex-1 p-2 sm:p-4 transition-colors duration-200 overflow-hidden ${darkMode ? 'bg-gray-950' : 'bg-gray-50'}`}>
-        <div className="h-full overflow-hidden">
-          <div className={`grid gap-2 sm:gap-4 h-full overflow-hidden ${showParticipants ? 'grid-cols-1 lg:grid-cols-4' : 'grid-cols-1'}`}>
-            {/* Main Video */}
-            <div className={`${showParticipants ? 'lg:col-span-3' : 'col-span-1'} rounded-xl sm:rounded-2xl overflow-hidden shadow-lg relative group transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
-              <div className="w-full h-full bg-linear-to-br from-green-600 to-green-800 flex items-center justify-center relative overflow-hidden">
-                {stream && !cameraOff ? (
-                  <video ref={videoRef} autoPlay playsInline  className="absolute inset-0 w-full h-full object-cover" />
-                ) : (
-                <div className="flex flex-col items-center">
-                  <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full bg-green-700 flex items-center justify-center mb-2 sm:mb-4 ring-4 ring-green-500/30">
-                    <span className="text-2xl sm:text-4xl font-bold text-white">{myInitials}</span>
-                  </div>
-                  <h2 className="text-white text-lg sm:text-xl font-semibold">{myName}</h2>
-                  <p className="text-green-200 text-xs sm:text-sm">Your video</p>
-                </div>
-                )}
-                {cameraOff && (
-                  <div className="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-sm">
-                    <div className="text-center">
-                      <svg className="w-8 h-8 sm:w-12 sm:h-12 text-white mx-auto mb-2" fill="currentColor" viewBox="0 0 20 20">
-                        <path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm10.5-2L9 4.5 7.5 3h5z" />
-                      </svg>
-                      <p className="text-white text-xs sm:text-sm font-medium">Camera off</p>
+      <div className="flex-1 flex overflow-hidden">
+        <div className={`flex-1 p-2 sm:p-4 transition-colors duration-200 overflow-hidden ${darkMode ? 'bg-gray-950' : 'bg-gray-50'}`}>
+          <div className="h-full overflow-hidden">
+            <div className={`grid gap-2 sm:gap-4 h-full overflow-hidden ${showParticipants ? 'grid-cols-1 lg:grid-cols-4' : 'grid-cols-1'}`}>
+              {/* Main Video */}
+              <div className={`${showParticipants ? 'lg:col-span-3' : 'col-span-1'} rounded-xl sm:rounded-2xl overflow-hidden shadow-lg relative group transition-colors duration-200 ${darkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
+                <div className="w-full h-full bg-linear-to-br from-green-600 to-green-800 flex items-center justify-center relative overflow-hidden">
+                  {stream && !cameraOff ? (
+                    <video ref={videoRef} autoPlay playsInline className="absolute inset-0 w-full h-full object-cover" />
+                  ) : (
+                    <div className="flex flex-col items-center">
+                      <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-full bg-green-700 flex items-center justify-center mb-2 sm:mb-4 ring-4 ring-green-500/30">
+                        <span className="text-2xl sm:text-4xl font-bold text-white">{myInitials}</span>
+                      </div>
+                      <h2 className="text-white text-lg sm:text-xl font-semibold">{myName}</h2>
+                      <p className="text-green-200 text-xs sm:text-sm">Your video</p>
                     </div>
-                  </div>
-                )}
-              </div>
-            </div>
-            {/* Remote peers thumbnail rail */}
-            {remotePeers.length > 0 && (
-              <div className={`mt-2 ${showParticipants ? 'lg:col-span-3' : 'col-span-1'}`}>
-                <div className="flex gap-2 flex-wrap">
-                  {remotePeers.map((rp) => (
-                    <div key={rp.socketId} className={`relative w-40 h-24 rounded-md overflow-hidden ${darkMode ? 'bg-gray-900/40' : 'bg-gray-200/60'}`}>
-                      <video autoPlay playsInline className="w-full h-full object-cover" ref={(el)=>{ if (el && rp.stream) (el as any).srcObject = rp.stream }} />
-                      <div className={`absolute bottom-0 left-0 right-0 text-[10px] px-1 py-0.5 truncate ${darkMode ? 'bg-black/40 text-white' : 'bg-white/60 text-gray-900'}`}>
-                        {rp.name || rp.userId || 'Participant'}
+                  )}
+                  {cameraOff && (
+                    <div className="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-sm">
+                      <div className="text-center">
+                        <svg className="w-8 h-8 sm:w-12 sm:h-12 text-white mx-auto mb-2" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M2 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zm10.5-2L9 4.5 7.5 3h5z" />
+                        </svg>
+                        <p className="text-white text-xs sm:text-sm font-medium">Camera off</p>
                       </div>
                     </div>
-                  ))}
+                  )}
                 </div>
               </div>
-            )}
+              {/* Remote peers thumbnail rail */}
+              {remotePeers.length > 0 && (
+                <div className={`mt-2 ${showParticipants ? 'lg:col-span-3' : 'col-span-1'}`}>
+                  <div className="flex gap-2 flex-wrap">
+                    {remotePeers
+                      .filter(rp => rp.stream && rp.stream.getTracks().length > 0)
+                      .map((rp) => {
+                        // Get the actual name from peerInfo or use fallback
+                        const peerInfo = peerInfoRef.current.get(rp.socketId)
+                        const participantName = peerInfo?.name || rp.name || rp.userId || 'Remote User'
+                        
+                        console.log(`Rendering remote peer ${rp.socketId}:`, { 
+                          name: participantName,
+                          peerInfoName: peerInfo?.name,
+                          rpName: rp.name,
+                          hasStream: !!rp.stream,
+                          tracks: rp.stream?.getTracks().length || 0,
+                          videoTracks: rp.stream?.getVideoTracks().length || 0,
+                          audioTracks: rp.stream?.getAudioTracks().length || 0
+                        })
+                        
+                        return (
+                          <div key={rp.socketId} className={`relative w-40 h-24 rounded-md overflow-hidden ${darkMode ? 'bg-gray-900/40' : 'bg-gray-200/60'}`}>
+                            <video 
+                              autoPlay 
+                              playsInline
+                              muted={false}
+                              controls={false}
+                              className="w-full h-full object-cover" 
+                              onLoadedData={() => console.log(`Video loaded for ${participantName}`)}
+                              onError={(e) => console.error(`Video error for ${participantName}:`, e)}
+                              onCanPlay={() => {
+                                console.log(`Video can play for ${participantName}`)
+                                // Ensure audio is enabled
+                                if (rp.stream) {
+                                  rp.stream.getAudioTracks().forEach(track => {
+                                    console.log(`Audio track for ${participantName}:`, {
+                                      enabled: track.enabled,
+                                      readyState: track.readyState,
+                                      muted: track.muted
+                                    })
+                                  })
+                                }
+                              }}
+                              ref={(el) => {
+                                if (el && rp.stream) {
+                                  console.log(`Assigning stream to video element for ${participantName}`, {
+                                    streamId: rp.stream.id,
+                                    tracks: rp.stream.getTracks().map(t => ({ kind: t.kind, enabled: t.enabled, readyState: t.readyState }))
+                                  })
+                                  ;(el as any).srcObject = rp.stream
+                                  
+                                  // Set volume to 100% and ensure it's not muted
+                                  el.volume = 1.0
+                                  el.muted = false
+                                  
+                                  // Ensure audio tracks are enabled
+                                  rp.stream.getAudioTracks().forEach(track => {
+                                    track.enabled = true
+                                    console.log(`Enabled audio track for ${participantName}:`, track.enabled)
+                                  })
+                                  
+                                  // Ensure video plays
+                                  el.play().catch(e => {
+                                    console.warn(`Failed to play video for ${participantName}:`, e)
+                                  })
+                                }
+                              }} 
+                            />
+                            <div className={`absolute bottom-0 left-0 right-0 text-[10px] px-1 py-0.5 truncate ${darkMode ? 'bg-black/40 text-white' : 'bg-white/60 text-gray-900'}`}>
+                              {participantName}
+                            </div>
+                          </div>
+                        )
+                      })}
+                  </div>
+                </div>
+              )}
 
-            {/* Participants Sidebar - Conditional */}
-            {showParticipants && (
-              <div className="lg:col-span-1 overflow-y-auto overflow-x-hidden pr-0 sm:pr-2 scrollbar-hide">
-                <ParticipantsSidebar participants={participants} />
-              </div>
-            )}
+              {/* Participants Sidebar - Conditional */}
+              {showParticipants && (
+                <div className="lg:col-span-1 overflow-y-auto overflow-x-hidden pr-0 sm:pr-2 scrollbar-hide">
+                  <ParticipantsSidebar participants={participants} />
+                </div>
+              )}
+            </div>
           </div>
         </div>
+
+        {/* Participants Sidebar - Conditional for larger screens */}
+        {showParticipants && (
+          <div className={`hidden lg:block w-80 border-l overflow-y-auto overflow-x-hidden p-4 scrollbar-hide ${darkMode ? 'border-gray-800 bg-gray-900/70' : 'border-gray-200 bg-white/70'}`}>
+            <ParticipantsSidebar participants={participants} />
+          </div>
+        )}
       </div>
 
       {/* Controls */}
